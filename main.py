@@ -1,6 +1,9 @@
 import os
 import asyncio
 import json
+import threading
+import http.server
+import socketserver
 import websockets
 import psycopg2
 from psycopg2 import OperationalError
@@ -8,9 +11,26 @@ from psycopg2 import OperationalError
 # Load environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
 HELIUS_KEY = os.getenv("HELIUS_KEY")
+PORT = int(os.getenv("PORT", 10000))
 
+# 1. Dummy HTTP Server for Render Web Service health check
+class SimpleHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Solana Trading Agent is running!")
+
+def run_web_server():
+    """Run a lightweight web server to satisfy Render's port binding requirement"""
+    try:
+        with socketserver.TCPServer(("", PORT), SimpleHandler) as httpd:
+            print(f"[WEB] Dummy web server started on port {PORT}")
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"[WEB ERROR] Failed to start web server: {e}")
+
+# 2. Database Functions
 def get_db_connection():
-    """Establish secure connection to Neon database with error handling"""
     try:
         conn = psycopg2.connect(DATABASE_URL)
         return conn
@@ -19,7 +39,6 @@ def get_db_connection():
         return None
 
 def init_db():
-    """Initialize database tables"""
     conn = get_db_connection()
     if conn:
         try:
@@ -40,7 +59,6 @@ def init_db():
             print(f"[NEON DB ERROR] Table creation failed: {e}")
 
 async def log_trade_to_db(signature):
-    """Log processed transaction into database"""
     conn = get_db_connection()
     if conn:
         try:
@@ -56,8 +74,8 @@ async def log_trade_to_db(signature):
         except Exception as e:
             print(f"[NEON DB ERROR] Insert failed: {e}")
 
+# 3. Helius WebSocket Stream
 async def listen_helius():
-    """Maintain stable Helius WebSocket connection with automatic reconnection"""
     uri = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
     
     while True:
@@ -66,7 +84,6 @@ async def listen_helius():
             async with websockets.connect(uri) as websocket:
                 print("[HELIUS] WebSocket Connected Successfully!")
                 
-                # Subscription request to monitor transactions
                 subscribe_request = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -101,6 +118,11 @@ if __name__ == "__main__":
     print("[BOT] Initializing Solana Trading Agent...")
     init_db()
     
+    # Start the web server in a separate background thread for Render health check
+    server_thread = threading.Thread(target=run_web_server, daemon=True)
+    server_thread.start()
+    
+    # Run the main async loop for Helius
     try:
         asyncio.run(listen_helius())
     except KeyboardInterrupt:
